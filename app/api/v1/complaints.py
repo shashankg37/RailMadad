@@ -1,5 +1,7 @@
+import json
 from datetime import datetime
 from math import ceil
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session, selectinload
@@ -8,18 +10,45 @@ from app.core.security import get_current_user, require_official, require_passen
 from app.models.complaint import Complaint, ComplaintMedia, ComplaintStatus
 from app.models.user import User, UserRole
 from app.schemas.complaint import AnalysisResult, ComplaintCreated, ComplaintPage, ComplaintResponse, CreateComplaintRequest, StatusUpdate
+from app.services.ai_pipeline import IntegrationError, analyze_complaint
 from app.services.complaint_service import change_status, get_complaint_for_user, new_complaint_id, submit_analysis_result
+from app.core.config import get_settings
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
 @router.post("", response_model=ComplaintCreated, status_code=201)
-def create(payload: CreateComplaintRequest, db: Session = Depends(get_db), user: User = Depends(require_passenger)):
+async def create(payload: CreateComplaintRequest, db: Session = Depends(get_db), user: User = Depends(require_passenger)):
     media = db.scalars(select(ComplaintMedia).where(ComplaintMedia.id.in_(payload.media_ids), ComplaintMedia.complaint_id.is_(None))).all()
     if len(media) != len(set(payload.media_ids)): raise HTTPException(422, "One or more media records are unavailable")
     types = {m.media_type for m in media}
-    if len(types) != 1: raise HTTPException(422, "All media in a complaint must use one media type")
-    complaint = Complaint(complaint_id=new_complaint_id(db), user_id=user.id, language=payload.language, media_type=media[0].media_type)
+    if media and len(types) != 1: raise HTTPException(422, "All media in a complaint must use one media type")
+    complaint = Complaint(complaint_id=new_complaint_id(db), user_id=user.id, language=payload.language, media_type=media[0].media_type if media else None)
     db.add(complaint); db.flush()
     for item in media: item.complaint_id = complaint.id
-    db.commit(); db.refresh(complaint); return complaint
+    db.commit(); db.refresh(complaint)
+
+    try:
+        source = media[0] if media else None
+        source_path = None
+        if source and source.original_url.startswith("/media/"):
+            source_path = get_settings().local_storage_path / Path(source.original_url).name
+        analysis, state = await analyze_complaint(
+            source.media_type.value if source else None,
+            source_path,
+            payload.text,
+        )
+        submit_analysis_result(db, complaint, analysis, user)
+        if source:
+            source.analysis_metadata = json.dumps({"evidence": analysis.evidence, "errors": state.errors})
+            if state.file_url:
+                source.annotated_url = f"/media/{Path(state.file_url).name}"
+        db.commit(); db.refresh(complaint)
+    except (IntegrationError, RuntimeError) as exc:
+        complaint.processing_error = str(exc)
+        if complaint.status == ComplaintStatus.submitted:
+            change_status(db, complaint, ComplaintStatus.processing, user, "Analysis started")
+        if complaint.status == ComplaintStatus.processing:
+            change_status(db, complaint, ComplaintStatus.failed, user, "Analysis failed")
+        db.commit(); db.refresh(complaint)
+    return complaint
 @router.get("/{complaint_id}", response_model=ComplaintResponse)
 def retrieve(complaint_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     return get_complaint_for_user(db, complaint_id, user)

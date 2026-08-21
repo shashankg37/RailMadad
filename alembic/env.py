@@ -5,7 +5,7 @@ from app.core.config import get_settings
 from app.core.database import Base
 import app.models
 config = context.config
-if config.config_file_name: fileConfig(config.config_file_name)
+if config.config_file_name and config.get_section("loggers"): fileConfig(config.config_file_name)
 config.set_main_option("sqlalchemy.url", get_settings().database_url)
 target_metadata = Base.metadata
 def run_migrations_offline():

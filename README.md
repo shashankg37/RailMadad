@@ -1,6 +1,6 @@
 # Rail Madad AI Backend
 
-Rail Madad AI is the backend and AI orchestration layer for railway complaint triage. The project exposes FastAPI endpoints for authentication, uploads, complaint management, and AI-assisted analysis while keeping the frontend out of scope.
+Rail Madad AI is the backend and AI orchestration layer for railway complaint triage. The project exposes FastAPI endpoints for authentication, uploads, complaint management, and multimodal AI-assisted analysis. This repository does not contain a frontend.
 
 ## Architecture
 
@@ -34,11 +34,11 @@ Required variables include:
 
 ## YOLO model placement
 
-The repository expects a trained YOLO model at `models/best.pt` by default. If the file is not present, the API raises a clear configuration error instead of fabricating detections. Place the trained model in the configured path before running image inference.
+The repository expects the trained YOLO model at `models/weights/best.pt` by default. If the file is not present, the API raises a clear configuration error instead of fabricating detections. The path and confidence threshold are configurable through `YOLO_MODEL_PATH` and `YOLO_CONFIDENCE_THRESHOLD`.
 
 ## External AI services
 
-- YOLOv8: loaded once and reused through `YOLOService`
+- YOLOv8: loaded once and reused through `app/services/yolo_service.py`
 - EasyOCR: isolated through `OCRService`
 - Qwen: hosted provider integration through `QwenClient`
 - Sarvam AI: primary speech-to-text provider
@@ -82,13 +82,13 @@ The suite includes the backend contract tests and the AI pipeline safety/routing
 
 ## Troubleshooting
 
-- If YOLO fails, verify `models/best.pt` exists and the `YOLO_MODEL_PATH` setting is correct.
+- If YOLO fails, verify `models/weights/best.pt` exists and the `YOLO_MODEL_PATH` setting is correct.
 - If uploads fail, confirm the file type and size are within the configured limits.
 - If AI provider calls fail, validate the API keys, base URLs, and timeout configuration.
 - If Redis or Postgres are unhealthy in Docker, check the health checks and environment values.
 
 ## Notes
 
-- Frontend code is intentionally not included in this repo.
+- Frontend code is not included in this repository and must consume the versioned `/api/v1` contracts.
 - Secrets must never be committed to source control.
 - The backend is designed so the frontend can connect later without architecture changes.

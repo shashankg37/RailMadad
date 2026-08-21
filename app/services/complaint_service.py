@@ -55,7 +55,10 @@ def submit_analysis_result(db: Session, complaint: Complaint, analysis: Analysis
 
     detected_label = analysis.category.strip().lower()
     routing = DEPARTMENT_ROUTING.get(detected_label, [])
-    if routing:
+    if analysis.department:
+        complaint.department = analysis.department
+        complaint.departments = analysis.department
+    elif routing:
         complaint.department = routing[0]
         complaint.departments = "; ".join(routing)
     else:

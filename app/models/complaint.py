@@ -32,7 +32,7 @@ class Complaint(Base):
     complaint_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     language: Mapped[str] = mapped_column(String(10), default="en")
-    media_type: Mapped[MediaType] = mapped_column(Enum(MediaType))
+    media_type: Mapped[MediaType | None] = mapped_column(Enum(MediaType), nullable=True)
     category: Mapped[str | None] = mapped_column(String(120), index=True, nullable=True)
     subcategory: Mapped[str | None] = mapped_column(String(120), nullable=True)
     severity: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)

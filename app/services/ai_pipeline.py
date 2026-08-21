@@ -11,17 +11,11 @@ import httpx
 from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
+from app.services.yolo_service import Detection, YOLOService
 
 
 class IntegrationError(RuntimeError):
     pass
-
-
-class Detection(BaseModel):
-    class_id: int
-    label: str
-    confidence: float = Field(ge=0, le=1)
-    bbox: list[float]
 
 
 class OCRResult(BaseModel):
@@ -37,15 +31,17 @@ class AIResult(BaseModel):
     summary: str
     suggested_action: str
     coach_number: str | None = None
+    department: str | None = None
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
 
 
 DEPARTMENT_ROUTING: dict[str, list[str]] = {
-    "broken_seat": ["Maintenance / Carriage & Wagon"],
-    "dirty_coach": ["Housekeeping / Sanitation"],
-    "water_leakage": ["Engineering / Carriage & Wagon"],
-    "electrical_appliance": ["Electrical"],
-    "crowded": ["Operations / Security"],
+    "garbage": ["Housekeeping / Sanitation"],
+    "broken_glass_or_cracked_window": ["Maintenance / Carriage & Wagon"],
+    "graffiti": ["Security / Railway Protection Force"],
+    "fire_sign": ["Fire & Safety"],
+    "water_leak": ["Engineering / Carriage & Wagon"],
 }
 
 
@@ -64,50 +60,6 @@ def sample_video_frames(total_frames: int, max_frames: int = 8, interval_seconds
         stride = max(stride, interval_seconds)
     end = min(total_frames, max_frames * stride)
     return list(range(0, end, stride))[:max_frames]
-
-
-class YOLOService:
-    names = ["broken_seat", "dirty_coach", "water_leakage", "electrical_appliance", "crowded"]
-
-    def __init__(self):
-        self._model = None
-
-    def model(self):
-        if self._model is None:
-            path = get_settings().yolo_model_path
-            if not path.is_file():
-                raise IntegrationError(f"YOLO model not found at {path}; place trained best.pt there")
-            try:
-                from ultralytics import YOLO
-
-                self._model = YOLO(str(path))
-            except ImportError as exc:
-                raise IntegrationError("Install ultralytics to enable YOLO inference") from exc
-        return self._model
-
-    def infer(self, image: Path) -> tuple[list[Detection], Path | None]:
-        model = self.model()
-        result = model(str(image), conf=get_settings().yolo_confidence_threshold, verbose=False)[0]
-        detections = []
-        for box in result.boxes:
-            class_id = int(box.cls[0])
-            label = result.names.get(class_id, self.names[class_id]) if hasattr(result.names, "get") else self.names[class_id]
-            detections.append(
-                Detection(
-                    class_id=class_id,
-                    label=label,
-                    confidence=float(box.conf[0]),
-                    bbox=[round(float(x), 2) for x in box.xyxy[0].tolist()],
-                )
-            )
-        annotated = image.with_name(f"{image.stem}.annotated.jpg")
-        try:
-            import cv2
-
-            cv2.imwrite(str(annotated), result.plot())
-        except ImportError:
-            annotated = None
-        return detections, annotated
 
 
 class OCRService:
@@ -138,7 +90,14 @@ class OCRService:
 
 
 class QwenClient:
-    async def analyze(self, image: Path | None, detections: list[Detection], ocr: list[OCRResult], transcript: str | None) -> AIResult:
+    async def analyze(
+        self,
+        image: Path | None,
+        detections: list[Detection],
+        ocr: list[OCRResult],
+        transcript: str | None,
+        user_text: str | None = None,
+    ) -> AIResult:
         settings = get_settings()
         if not settings.qwen_api_key or not settings.qwen_base_url:
             raise IntegrationError("QWEN_API_KEY and QWEN_BASE_URL are required")
@@ -147,13 +106,15 @@ class QwenClient:
             "detections": [d.model_dump() for d in detections],
             "ocr": [o.model_dump() for o in ocr],
             "transcript": transcript,
+            "user_text": user_text,
         }
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
                     "Use only this evidence. Return JSON only with keys: category, subcategory, severity, "
-                    "summary, suggested_action, coach_number, confidence. Severity must be 1-5 and confidence 0-1. "
+                    "summary, suggested_action, coach_number, department, evidence, confidence. Severity must be 1-5 "
+                    "and confidence 0-1. Evidence must be a list of observations grounded in the supplied input. "
                     "Do not invent facts. Evidence: " + json.dumps(evidence)
                 ),
             }
@@ -281,6 +242,7 @@ class PipelineState:
     file_url: str | None = None
     language: str = "en"
     transcript: str | None = None
+    user_text: str | None = None
     translated_text: str | None = None
     speech_provider: str | None = None
     ocr_results: list[dict[str, Any]] = field(default_factory=list)
@@ -295,6 +257,7 @@ class PipelineState:
     suggested_action: str | None = None
     departments: list[str] = field(default_factory=list)
     confidence: float | None = None
+    evidence: list[dict[str, Any]] = field(default_factory=list)
     processing_times: dict[str, float] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     status: str = "submitted"
@@ -308,13 +271,13 @@ def safety_and_departments(detections: list[Detection], severity: int) -> tuple[
             if department not in departments:
                 departments.append(department)
     threshold = get_settings().yolo_confidence_threshold
-    critical = any(d.label == "electrical_appliance" and d.confidence >= threshold for d in detections)
-    final_severity = max(severity, 4) if critical else severity
+    critical = any(d.label == "fire_sign" and d.confidence >= threshold for d in detections)
+    final_severity = max(severity, 5) if critical else severity
     return final_severity, departments, {
         "model_severity": severity,
         "final_severity": final_severity,
         "override_applied": critical,
-        "reason": "Safety-critical condition detected." if critical else None,
+        "reason": "Fire evidence detected." if critical else None,
     }
 
 
@@ -349,6 +312,67 @@ def run_langgraph_pipeline(state: PipelineState | None = None, **kwargs: Any) ->
 
 def validate_ai_result(payload: dict[str, Any]) -> AIResult:
     return AIResult.model_validate(payload)
+
+
+async def analyze_complaint(
+    media_type: str | None,
+    media_path: Path | None = None,
+    user_text: str | None = None,
+) -> tuple[AIResult, PipelineState]:
+    """Run available evidence extractors, then ask Qwen for the final classification."""
+    state = build_langgraph_state(file_type=media_type, user_text=user_text)
+    detections: list[Detection] = []
+    ocr_results: list[OCRResult] = []
+    transcript: str | None = None
+
+    if media_type == "image" and media_path:
+        try:
+            detections, annotated = yolo_service.infer(media_path)
+            state.yolo_detections = [item.model_dump() for item in detections]
+            if annotated:
+                state.file_url = str(annotated)
+        except Exception as exc:
+            state.errors.append(f"YOLO: {exc}")
+        try:
+            ocr_results = ocr_service.read(media_path)
+            state.ocr_results = [item.model_dump() for item in ocr_results]
+        except Exception as exc:
+            state.errors.append(f"OCR: {exc}")
+    elif media_type == "audio" and media_path:
+        try:
+            speech = await sarvam_client.transcribe(media_path)
+        except IntegrationError as sarvam_error:
+            try:
+                speech = whisper_service.transcribe(media_path)
+            except Exception as whisper_error:
+                if not user_text:
+                    raise IntegrationError(f"Speech-to-text failed: {sarvam_error}; {whisper_error}") from whisper_error
+                state.errors.append(f"STT: {sarvam_error}; {whisper_error}")
+        transcript = speech.get("transcript")
+        state.transcript = transcript
+        state.language = str(speech.get("language") or "unknown")
+        state.speech_provider = speech.get("provider")
+    elif media_type == "video":
+        state.errors.append("Video analysis is not implemented yet")
+
+    if not user_text and not transcript and not detections and not ocr_results:
+        raise IntegrationError("No usable complaint evidence was available")
+
+    result = await qwen_client.analyze(media_path if media_type == "image" else None, detections, ocr_results, transcript, user_text)
+    result.evidence = [item.model_dump() for item in detections] + [item.model_dump() for item in ocr_results]
+    final_severity, departments, _ = safety_and_departments(detections, result.severity)
+    result.severity = final_severity
+    result.department = result.department or (departments[0] if departments else None)
+    state.category = result.category
+    state.subcategory = result.subcategory
+    state.final_severity = result.severity
+    state.summary = result.summary
+    state.suggested_action = result.suggested_action
+    state.departments = departments
+    state.confidence = result.confidence
+    state.evidence = result.evidence
+    state.status = "classified"
+    return result, state
 
 
 yolo_service = YOLOService()

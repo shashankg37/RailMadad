@@ -21,8 +21,8 @@ class Settings(BaseSettings):
     sarvam_api_key: str = ""
     sarvam_base_url: str = "https://api.sarvam.ai"
     sarvam_model: str = "saaras:v3"
-    yolo_model_path: Path = Path.home() / "railmadad-models" / "best.pt"
-    yolo_confidence_threshold: float = 0.5
+    yolo_model_path: Path = Path("models/weights/best.pt")
+    yolo_confidence_threshold: float = 0.25
     video_max_frames: int = 8
     video_sample_interval_seconds: int = 2
     external_timeout_seconds: float = 30
@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     @property
     def allowed_types(self) -> set[str]:
         return set((self.allowed_image_types + "," + self.allowed_video_types + "," + self.allowed_audio_types).split(","))
+
+    @property
+    def resolved_yolo_model_path(self) -> Path:
+        if self.yolo_model_path.is_absolute():
+            return self.yolo_model_path
+        return Path(__file__).resolve().parents[2] / self.yolo_model_path
 
 
 @lru_cache
