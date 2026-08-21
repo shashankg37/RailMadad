@@ -4,3 +4,8 @@ __pycache__/
 *.py[cod]
 storage/
 .pytest_cache/
+venv/
+.vscode/
+.idea/
+.gemini/
+*.log
